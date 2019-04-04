@@ -41,7 +41,13 @@
     <script src="../dist/logline.js"></script>
     <script src="./main.js"></script>
     <script>
-        test('localstorage');
+        Logline.setConfig({
+            loadEventEnd: 1
+        })
+        Logline.init()
+        setTimeout(() => {
+            throw 'sss'
+        },5000)
     </script>
 </body>
 </html>

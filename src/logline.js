@@ -1,188 +1,256 @@
-import Interface from './protocols/interface';
-import IndexeddbLogger from './protocols/indexeddb';
-import LocalstorageLogger from './protocols/localstorage';
-import WebsqlLogger from './protocols/websql';
-import * as util from './lib/util';
-import config from './lib/config';
-
-
 class Logline {
+    // static set _config(value) {     throw new Error('不允许设置') } static get _config
+    // () {     return Logline.Logline }
     /**
-     * Logline constructor
-     * @constructor
-     * @param {String} namespace - namespace to use
-     * @return {Object Protocol Instance}
+     * 设置自定义属性
+     * @param {obj} customConfig
      */
-    constructor(namespace) {
-        if (!(this instanceof Logline)) {
-            return new Logline(namespace);
-        }
-        try {
-            Logline._checkProtocol();
-            return new Logline._protocol(namespace);
-        } catch (e) {
-            return new Interface(namespace);
-        }
+    static setConfig(customConfig) {
+        Logline._config = Object.assign(Logline._config, customConfig)
     }
 
-    /**
-     * change config
-     * @method config
-     * @param {String|Object} key - config key, or config object
-     * @param {Any} [value] - new config value
-     * @return {Void}
-     */
-    static get config() {
-        return config;
-    }
+    static initPerformance() {
 
-    /**
-     * choose a protocol to initialize
-     * @method _initProtocol
-     * @private
-     * @static
-     * @param {Object Protocol Class} protocol - protocol to use, must under Logline.PROTOCOL
-     * @return {Object} Logline
-     */
-    static _initProtocol(protocol) {
-        Logline._protocol = protocol;
-        Logline._protocol.init(Logline._database || 'logline');
-    }
-
-    /**
-     * check protocol
-     * if no protocol is chosen, will try to choose an available one automatically
-     * if none of the protocols is available, an error will be thrown
-     * @method _checkProtocol
-     * @private
-     * @static
-     */
-    static _checkProtocol() {
-        if (!Logline._protocol) {
-            let protocols = Object.keys(Logline.PROTOCOL), protocol;
-            while ((protocol = Logline.PROTOCOL[protocols.shift()])) {
-                if (protocol.support) {
-                    Logline._initProtocol(protocol);
-                    return;
-                }
+        class badPerformance {
+            constructor(performanceNavigationTiming) {
+                this.time = new Date()
+                this.appversion = navigator.appVersion
+                this.performanceNavigationTiming = performanceNavigationTiming
             }
+        }
+        window.addEventListener('load', () => {
+            console.log('load')
+            let performanceNavigationTiming = performance.getEntries()[0]
+            if (performanceNavigationTiming.domComplete > Logline._config.loadEventEnd) {
+                Logline.uploadBadPerformances(new badPerformance(performanceNavigationTiming))
+            }
+        })
 
-            util.throwError('protocols ' + protocols.join(', ').toLowerCase() + ' are not supported on this platform');
+    }
+
+    static initJsErrorPlayback() {
+        class UserOperation {
+            constructor(target) {
+                this.tagName = target.tagName
+                this.className = target.className
+                this.id = target.id
+            }
+        }
+        window.addEventListener('click', (e) => {
+            Logline.userOperations.push(new UserOperation(e.target))
+            console.log(Logline.userOperations)
+            if (Logline.userOperations.length > Logline._config.jsErrorSteps) {
+                Logline
+                    .userOperations
+                    .shift()
+            }
+        })
+        window.onerror = function(message, source, lineno, colno, error) {
+           let errorMessage = {
+                message: message,
+                source: source,
+                lineno: lineno,
+                colno: colno,
+                error: error
+           }
+           Logline.uploadJsErrorPlayback(Logline.userOperations.concat([errorMessage]))
         }
     }
 
-    /**
-     * get logs in range
-     * if from and end is not defined, will fetch full log
-     * @method get
-     * @static
-     * @param {String} [from] - time from
-     * @param {String} [to] - time end
-     * @param {Function} readyFn - function to call back with logs as parameter
-     */
-    static get(from, to, readyFn) {
-        Logline._checkProtocol();
+    static init() {
+        localStorage.badPerformances = ''
+        localStorage.UserOperations = ''
+        Logline.wrapper()//是否需要包裹跨域引用链接
+        Logline.initPerformance()
+        Logline.initJsErrorPlayback()
+    }
 
-        switch (arguments.length) {
-            case 1:
-                readyFn = from;
-                from = undefined;
-                break;
-            case 2:
-                readyFn = to;
-                to = undefined;
-                break;
-            case 3:
-            default:
-                break;
+    static wrapper() {
+        let global = window
+        var tryJs = {}
+        // function or not
+        var _isFunction = function (foo) {
+            return typeof foo === "function";
+        };
+        var _onthrow = function (errObj) {
+            Logline.uploadJsErrorPlayback(Logline.userOperations.concat([errObj]))
+        };
+        /**
+         * makeObjTry
+         * wrap a object's all value with try & catch
+         * @param {Function} foo
+         * @param {Object} self
+         * @returns {Function}
+         */
+        var makeObjTry = function (obj) {
+            var key,
+                value;
+            for (key in obj) {
+                value = obj[key];
+                if (_isFunction(value))
+                    obj[key] = cat(value);
+                }
+            return obj;
+        };
+        // before: foo(cb,timeout) after: catTimeout(foo)(cb,timeout)
+        // 好像还是保护了foo的作用域，并且拓展了setTimeout具有了throw的功能
+        var catTimeout = function (foo) {
+            return function (cb, timeout) {
+                // for setTimeout(string, delay)
+                if (typeof cb === "string") {
+                    try {
+                        cb = new Function(cb);
+                    } catch (err) {
+                        throw err;
+                    }
+                }
+                var args = []
+                    .slice
+                    .call(arguments, 2);
+                // for setTimeout(function, delay, param1, ...)
+                cb = cat(cb, args.length && args);
+                return foo(cb, timeout);
+            };
+        };
+        // 本来的调用方式是： foo(func1,func2,func3) 现在的调用方式是：catArgs(foo)(func1,func2,func3...)
+        // 作用是：保护了foo的作用域 并且本来foo是外链中的，但是catArgs我们同源中的东西，使得包装后返回的函数，能够正确被try-catch err
+        var catArgs = function (foo) {
+            return function () {
+                var arg,
+                    args = [];
+                for (var i = 0, l = arguments.length; i < l; i++) {
+                    arg = arguments[i];
+                    _isFunction(arg) && (arg = cat(arg));
+                    args.push(arg);
+                }
+                return foo.apply(this, args);
+            };
+        };
+        //目的：包装函数，使得包装后的函数具有throw的能力 参数是函数
+        var cat = function (foo, args) {
+            return function () {
+                try {
+                    return foo.apply(this, args || arguments);
+                } catch (error) {
+
+                    _onthrow(error);
+
+                    // some browser throw error (chrome) , can not find error where it throw,  so
+                    // print it on console;
+                    if (error.stack && console && console.error) {
+                        console.error("[BJ-REPORT]", error.stack);
+                    }
+
+                    // hang up browser and throw , but it should trigger onerror , so rewrite
+                    // onerror then recover it
+                    if (!Logline.timeoutkey) {
+                        var orgOnerror = global.onerror;
+                        global.onerror = function () {};
+                        Logline.timeoutkey = setTimeout(function () {
+                            global.onerror = orgOnerror;
+                            Logline.timeoutkey = null;
+                        }, 50);
+                    }
+                    throw error;
+                }
+            };
         }
 
-        Logline._protocol.get(from, to, readyFn);
-    }
+        /**
+         * wrap custom of function ,
+         * @param obj - obj or  function
+         * @returns {Function}
+         */
+        tryJs.spyCustom = function (obj) {
+            if (_isFunction(obj)) {
+                return cat(obj);
+            } else {
+                return makeObjTry(obj);
+            }
+        }
+        /**
+         * wrap async of function in window , exp : setTimeout , setInterval
+         * @returns {Function}
+         */
+        tryJs.spySystem = function () {
+            global.setTimeout = catTimeout(global.setTimeout);
+            global.setInterval = catTimeout(global.setInterval);
+            return tryJs;
+        };
 
-    /**
-     * read all logs
-     * @method all
-     * @static
-     * @param {Function} readyFn - function to call back with logs as parameter
-     */
-    static all(readyFn) {
-        Logline.get(readyFn);
-    }
-
-    /**
-     * clean up logs = keep limited logs
-     * @method keep
-     * @static
-     * @param {String} daysToMaintain - specialfy days to keep, support human readable format such as '3d', '.3'
-     * @return {Object} Logline
-     */
-    static keep(daysToMaintain) {
-        Logline._checkProtocol();
-        Logline._protocol.keep(daysToMaintain);
-        return this;
-    }
-
-    /**
-     * delete log database
-     * @method clean
-     * @static
-     * @return {Object} Logline
-     */
-    static clean() {
-        Logline._checkProtocol();
-        Logline._protocol.clean();
-        return this;
-    }
-
-    /**
-     * choose a protocol
-     * @method using
-     * @static
-     * @param {Object Protocol Class} protocol - wanted protocol, should be on of Logline.PROTOCOL
-     * @param {String} [database] - custome database name
-     * @return {Object} Logline
-     */
-    static using(protocol, database) {
-        // protocol unavailable is not allowed
-        if (-1 === [IndexeddbLogger, LocalstorageLogger, WebsqlLogger].indexOf(protocol)) {
-            util.throwError('specialfied protocol ' + (protocol ? (protocol + ' ') : '') + 'is not available');
+        /**
+        * wrap amd or commonjs of function  ,exp :  define , require ,
+        * @returns {Function}
+        */
+       tryJs.spyModules = function() {
+        var _require = global.require,
+            _define = global.define;
+        if (_define && _define.amd && _require) {
+            global.require = catArgs(_require);
+            _merge(global.require, _require);
+            global.define = catArgs(_define);
+            //对比下global.define = _define，区别是什么呢？
+            //global.define能直接引用到_define.，那么就具有修改_define变量的功能
+            //包装后的函数是一个匿名函数，保护住了_define的私有性
+            _merge(global.define, _define);
         }
 
-        // once protocol is selected, it shall not be changed during runtime
-        if (Logline._protocol) {
-            return this;
+        if (global.seajs && _define) {
+            global.define = function() {
+                var arg, args = [];
+                for (var i = 0, l = arguments.length; i < l; i++) {
+                    arg = arguments[i];
+                    if (_isFunction(arg)) {
+                        arg = cat(arg);
+                        //seajs should use toString parse dependencies , so rewrite it
+                        arg.toString = (function(orgArg) {
+                            return function() {
+                                return orgArg.toString();
+                            };
+                        }(arguments[i]));
+                    }
+                    args.push(arg);
+                }
+                return _define.apply(this, args);
+            };
+
+            global.seajs.use = catArgs(global.seajs.use);
+
+            _merge(global.define, _define);
         }
 
-        Logline.database(database || Logline._database);
-        Logline._initProtocol(protocol);
-        return this;
+        return tryJs;
+    };
+    tryJs.spyAll = function () {
+        tryJs.spyModules()
+            .spySystem();
+        return tryJs;
+    }
+    tryJs.spyAll()
     }
 
     /**
-     * specialfy a custome database name, in case of any conflicts
-     * @methd database
-     * @static
-     * @param {String} name - target database name
+     *
+     * @param {object} badPerformance
      */
-    static database(name) {
-        Logline._database = name;
+    static uploadBadPerformances(badPerformance) {
+        localStorage.badPerformances = JSON.stringify(badPerformance)
     }
+
+    static uploadJsErrorPlayback(userOperations) {
+        localStorage.userOperations = JSON.stringify(userOperations)
+    }
+
 }
 
-// export protocols for modification and mounting
-Logline.PROTOCOL = {
-    INDEXEDDB: IndexeddbLogger,
-    LOCALSTORAGE: LocalstorageLogger,
-    WEBSQL: WebsqlLogger
-};
+Logline._config = {
+    loadEventEnd: 2000,
+    jsErrorSteps: 5
+}
+Logline.timeoutkey
 
-// export protocol interface for user custom implements
-Logline.INTERFACE = Object.freeze(Interface);
+Logline.userOperations = new Array(Logline._config.jsErrorSteps)
 
-// export Logline env, just like Unix Environment variables
-Logline.env = {
-    verbose: true
-};
+window.Logline = Logline
 
-export default Logline;
+export default Logline
